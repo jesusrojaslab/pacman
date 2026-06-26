@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PAC-MAN Retro</title>
+<style>
+  /* ====== ESTÉTICA RETRO ARCADE ====== */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    color: #ffeb3b;
+    font-family: 'Courier New', Courier, monospace;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    overflow: hidden;
+  }
+  h1 {
+    color: #ffeb3b;
+    text-shadow: 0 0 8px #ffeb3b, 0 0 16px #ff6f00;
+    letter-spacing: 6px;
+    margin: 10px 0 4px;
+    font-size: 28px;
+  }
+  #hud {
+    display: flex;
+    gap: 30px;
+    font-size: 18px;
+    color: #fff;
+    margin-bottom: 8px;
+    text-shadow: 0 0 6px #00e5ff;
+  }
+  #hud span { color: #ffeb3b; }
+  #wrap {
+    position: relative;
+  }
+  canvas {
+    background: #000;
+    border: 3px solid #1565ff;
+    box-shadow: 0 0 20px #1565ff, inset 0 0 12px #001;
+    display: block;
+  }
+  /* ====== PANTALLAS DE ESTADO ====== */
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.82);
+    text-align: center;
+    gap: 14px;
+  }
+  #overlay.hidden { display: none; }
+  #overlay .big {
+    font-size: 40px;
+    letter-spacing: 4px;
+    text-shadow: 0 0 10px currentColor;
+  }
+  #overlay .msg { color: #fff; font-size: 16px; }
+  .blink { animation: blink 1s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+  .win  { color: #76ff03; }
+  .lose { color: #ff1744; }
+  .controls { color:#888; font-size:13px; margin-top:6px; }
+</style>
+</head>
+<body>
+  <h1>PAC-MAN</h1>
+  <div id="hud">
+    PUNTOS: <span id="score">0</span>
+    &nbsp;|&nbsp; VIDAS: <span id="lives">3</span>
+    &nbsp;|&nbsp; RÉCORD: <span id="high">0</span>
+  </div>
+
+  <div id="wrap">
+    <canvas id="game"></canvas>
+    <!-- Pantalla de inicio / fin -->
+    <div id="overlay">
+      <div class="big blink" id="overlayTitle">PAC-MAN</div>
+      <div class="msg" id="overlayMsg">Usa las flechas para moverte</div>
+      <div class="msg blink">PRESIONA ENTER O ESPACIO PARA EMPEZAR</div>
+      <div class="controls">↑ ↓ ← →  mover &nbsp;·&nbsp; P pausar</div>
+    </div>
+  </div>
+
+<script>
+/* =========================================================================
+   PAC-MAN RETRO — HTML5 Canvas, JavaScript puro (vanilla)
+   Un solo archivo. Sin librerías. 60 FPS con requestAnimationFrame.
+   ========================================================================= */
+
+/* ---------- 1. CONFIGURACIÓN Y LABERINTO ---------- */
+// Matriz del laberinto:
+// 1 = pared, 0 = punto (comida), 2 = power-up, 3 = vacío (sin comida),
+// 4 = puerta de la casa de fantasmas
+const RAW_MAP = [
+  "1111111111111111111111111111",
+  "1000000000000110000000000001",
+  "1011110111110110111110111101",
+  "1211110111110110111110111121",
+  "1011110111110110111110111101",
+  "1000000000000000000000000001",
+  "1011110110111111110110111101",
+  "1011110110111111110110111101",
+  "1000000110000110000110000001",
+  "1111110111110110111110111111",
+  "3333110111110110111110110333",
+  "3333110110000000000110110333",
+  "3333110110111441110110110333",
+  "1111110110133333310110111111",
+  "0000000003133333313000000000",
+  "1111110110133333310110111111",
+  "3333110110111111110110110333",
+  "3333110110000000000110110333",
+  "3333110110111111110110110333",
+  "1111110110111111110110111111",
+  "1000000000000110000000000001",
+  "1011110111110110111110111101",
+  "1011110111110110111110111101",
+  "1200110000000000000000110021",
+  "1110110110111111110110110111",
+  "1110110110111111110110110111",
+  "1000000110000110000110000001",
+  "1011111111110110111111111101",
+  "1011111111110110111111111101",
+  "1000000000000000000000000001",
+  "1111111111111111111111111111"
+];
+
+const TILE = 18;                       // tamaño de cada celda en píxeles
+const ROWS = RAW_MAP.length;
+const COLS = RAW_MAP[0].length;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = COLS * TILE;
+canvas.height = ROWS * TILE;
+
+// Convertimos el mapa de texto a una matriz mutable de números
+let grid = [];
+function buildGrid() {
+  grid = RAW_MAP.map(row => row.split('').map(Number));
+}
+
+/* ---------- 2. ESTADO GLOBAL DEL JUEGO ---------- */
+const STATE = { START: 0, PLAYING: 1, PAUSED: 2, WIN: 3, GAMEOVER: 4 };
+let gameState = STATE.START;
+
+let score = 0;
+let lives = 3;
+let highScore = Number(localStorage.getItem('pacman_high') || 0);
+let pelletsLeft = 0;       // puntos restantes en el nivel
+let frightenedTimer = 0;   // cuenta atrás del power-up (en frames)
+
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const highEl  = document.getElementById('high');
+const overlay = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayMsg = document.getElementById('overlayMsg');
+
+highEl.textContent = highScore;
+
+/* ---------- 3. UTILIDADES DE MOVIMIENTO ---------- */
+const DIRS = {
+  left:  { x: -1, y: 0 },
+  right: { x:  1, y: 0 },
+  up:    { x:  0, y: -1 },
+  down:  { x:  0, y: 1 },
+  none:  { x:  0, y: 0 }
+};
+
+// ¿La celda (c,f) es transitable para el jugador?
+function isWalkable(c, f) {
+  if (f < 0 || f >= ROWS) return false;
+  // Túnel horizontal: las columnas fuera de rango se gestionan aparte
+  if (c < 0 || c >= COLS) return true;
+  const v = grid[f][c];
+  return v !== 1 && v !== 4; // pared o puerta = bloqueado para Pac-Man
+}
+
+// Para fantasmas la puerta (4) sí es transitable (entran/salen de la casa)
+function isWalkableGhost(c, f) {
+  if (f < 0 || f >= ROWS) return false;
+  if (c < 0 || c >= COLS) return true;
+  return grid[f][c] !== 1;
+}
+
+/* ---------- 4. JUGADOR (PAC-MAN) ---------- */
+const player = {
+  startCol: 14, startFila: 23,
+  c: 14, f: 23,          // posición en celdas (puede ser fraccionaria)
+  dir: 'none',
+  nextDir: 'none',
+  speed: 0.13,           // celdas por frame
+  mouth: 0,              // ángulo de animación de la boca
+  reset() {
+    this.c = this.startCol; this.f = this.startFila;
+    this.dir = 'none'; this.nextDir = 'none';
+  }
+};
+
+/* ---------- 5. FANTASMAS ---------- */
+// 4 fantasmas con colores clásicos y comportamientos distintos
+function makeGhost(c, f, color, name) {
+  return {
+    startC: c, startF: f,
+    c, f,
+    color, name,
+    dir: 'up',
+    speed: 0.10,
+    eaten: false,        // ojos volviendo a casa
+    reset() {
+      this.c = this.startC; this.f = this.startF;
+      this.dir = 'up'; this.eaten = false;
+    }
+  };
+}
+let ghosts = [];
+function buildGhosts() {
+  ghosts = [
+    makeGhost(13, 14, '#ff0000', 'blinky'), // rojo: persigue directo
+    makeGhost(14, 14, '#ffb8ff', 'pinky'),  // rosa: se adelanta
+    makeGhost(13, 13, '#00ffff', 'inky'),   // cian: aleatorio
+    makeGhost(14, 13, '#ffb852', 'clyde')   // naranja: mixto
+  ];
+}
+
+/* ---------- 6. INICIALIZACIÓN DE NIVEL ---------- */
+function countPellets() {
+  let n = 0;
+  for (let f = 0; f < ROWS; f++)
+    for (let c = 0; c < COLS; c++)
+      if (grid[f][c] === 0 || grid[f][c] === 2) n++;
+  return n;
+}
+
+function newLevel() {
+  buildGrid();
+  buildGhosts();
+  player.reset();
+  pelletsLeft = countPellets();
+  frightenedTimer = 0;
+}
+
+function fullReset() {
+  score = 0;
+  lives = 3;
+  newLevel();
+  updateHUD();
+}
+
+/* ---------- 7. ENTRADA DE TECLADO ---------- */
+document.addEventListener('keydown', e => {
+  const k = e.key;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(k)) e.preventDefault();
+
+  if (gameState === STATE.START || gameState === STATE.WIN || gameState === STATE.GAMEOVER) {
+    if (k === 'Enter' || k === ' ') {
+      if (gameState !== STATE.START) fullReset();
+      startGame();
+    }
+    return;
+  }
+
+  if (k === 'p' || k === 'P') { togglePause(); return; }
+  if (gameState !== STATE.PLAYING) return;
+
+  if (k === 'ArrowUp')    player.nextDir = 'up';
+  if (k === 'ArrowDown')  player.nextDir = 'down';
+  if (k === 'ArrowLeft')  player.nextDir = 'left';
+  if (k === 'ArrowRight') player.nextDir = 'right';
+});
+
+function togglePause() {
+  if (gameState === STATE.PLAYING) {
+    gameState = STATE.PAUSED;
+    showOverlay('PAUSA', 'Presiona P para continuar', '');
+  } else if (gameState === STATE.PAUSED) {
+    hideOverlay();
+    gameState = STATE.PLAYING;
+  }
+}
+
+/* ---------- 8. LÓGICA DE ACTUALIZACIÓN ---------- */
+// ¿El personaje está centrado en una celda? (para poder girar)
+function atCenter(ent) {
+  const dx = Math.abs(ent.c - Math.round(ent.c));
+  const dy = Math.abs(ent.f - Math.round(ent.f));
+  return dx < 0.08 && dy < 0.08;
+}
+
+function moveEntity(ent, walkFn) {
+  // Cuando está centrado, fija la posición exacta y permite cambiar de dirección
+  if (atCenter(ent)) {
+    ent.c = Math.round(ent.c);
+    ent.f = Math.round(ent.f);
+
+    // Túnel horizontal (teletransporte de un lado a otro)
+    if (ent.c < 0) ent.c = COLS - 1;
+    if (ent.c > COLS - 1) ent.c = 0;
+
+    // Intentar tomar la dirección deseada (solo jugador usa nextDir)
+    if (ent.nextDir && ent.nextDir !== 'none') {
+      const d = DIRS[ent.nextDir];
+      if (walkFn(ent.c + d.x, ent.f + d.y)) {
+        ent.dir = ent.nextDir;
+        ent.nextDir = 'none';
+      }
+    }
+    // Si la dirección actual choca con pared, detenerse
+    const cd = DIRS[ent.dir];
+    if (!walkFn(ent.c + cd.x, ent.f + cd.y)) {
+      ent.dir = 'none';
+    }
+  }
+
+  const d = DIRS[ent.dir];
+  ent.c += d.x * ent.speed;
+  ent.f += d.y * ent.speed;
+}
+
+function updatePlayer() {
+  moveEntity(player, isWalkable);
+  player.mouth = (player.mouth + 0.18) % (Math.PI * 0.7);
+
+  // Comer puntos / power-ups
+  const c = Math.round(player.c), f = Math.round(player.f);
+  if (f >= 0 && f < ROWS && c >= 0 && c < COLS) {
+    const cell = grid[f][c];
+    if (cell === 0) {
+      grid[f][c] = 3; score += 10; pelletsLeft--; updateHUD();
+    } else if (cell === 2) {
+      grid[f][c] = 3; score += 50; pelletsLeft--;
+      frightenedTimer = 7 * 60;         // 7 segundos de fantasmas asustados
+      updateHUD();
+    }
+  }
+
+  if (pelletsLeft <= 0) winLevel();
+}
+
+// IA de fantasmas: elige en cada cruce la dirección hacia su objetivo
+function chooseGhostDir(g) {
+  const opposite = { up:'down', down:'up', left:'right', right:'left', none:'none' };
+  const options = [];
+  for (const name of ['up','down','left','right']) {
+    const d = DIRS[name];
+    if (name === opposite[g.dir]) continue;            // no dar media vuelta
+    if (isWalkableGhost(g.c + d.x, g.f + d.y)) options.push(name);
+  }
+  if (options.length === 0) return opposite[g.dir];     // callejón sin salida
+
+  // Objetivo según estado
+  let tc, tf;
+  if (g.eaten) {                       // ojos: vuelven a la casa
+    tc = 14; tf = 14;
+  } else if (frightenedTimer > 0) {    // asustado: huye al azar
+    return options[Math.floor(Math.random() * options.length)];
+  } else {
+    // Cada fantasma persigue de forma distinta (estilo arcade simplificado)
+    switch (g.name) {
+      case 'blinky': tc = player.c; tf = player.f; break;
+      case 'pinky':  tc = player.c + DIRS[player.dir].x*4;
+                     tf = player.f + DIRS[player.dir].y*4; break;
+      case 'clyde': {
+        const dist = Math.hypot(g.c - player.c, g.f - player.f);
+        if (dist < 6) { tc = 1; tf = ROWS - 2; }        // si está cerca, se aleja
+        else { tc = player.c; tf = player.f; }
+        break;
+      }
+      default: // inky: semi-aleatorio
+        if (Math.random() < 0.5) return options[Math.floor(Math.random()*options.length)];
+        tc = player.c; tf = player.f;
+    }
+  }
+
+  // Elegir la opción que minimiza la distancia al objetivo
+  let best = options[0], bestDist = Infinity;
+  for (const name of options) {
+    const d = DIRS[name];
+    const nc = g.c + d.x, nf = g.f + d.y;
+    const dist = Math.hypot(nc - tc, nf - tf);
+    if (dist < bestDist) { bestDist = dist; best = name; }
+  }
+  return best;
+}
+
+function updateGhosts() {
+  for (const g of ghosts) {
+    // Velocidad según estado
+    g.speed = g.eaten ? 0.22 : (frightenedTimer > 0 ? 0.07 : 0.10);
+
+    if (atCenter(g)) {
+      g.c = Math.round(g.c); g.f = Math.round(g.f);
+      if (g.c < 0) g.c = COLS - 1;
+      if (g.c > COLS - 1) g.c = 0;
+      g.dir = chooseGhostDir(g);
+
+      // Si llegó a casa siendo "ojos", revive
+      if (g.eaten && g.c === 14 && (g.f === 14 || g.f === 13)) {
+        g.eaten = false;
+      }
+    }
+    const d = DIRS[g.dir];
+    g.c += d.x * g.speed;
+    g.f += d.y * g.speed;
+  }
+}
+
+// Colisiones jugador-fantasma
+function checkCollisions() {
+  for (const g of ghosts) {
+    const dist = Math.hypot(g.c - player.c, g.f - player.f);
+    if (dist < 0.6) {
+      if (g.eaten) continue;
+      if (frightenedTimer > 0) {
+        // Comer fantasma
+        g.eaten = true;
+        score += 200; updateHUD();
+      } else {
+        loseLife();
+        return;
+      }
+    }
+  }
+}
+
+/* ---------- 9. CONTROL DE VIDAS / FIN ---------- */
+function loseLife() {
+  lives--;
+  updateHUD();
+  if (lives <= 0) {
+    gameOver();
+  } else {
+    // Reposicionar sin reiniciar el laberinto
+    player.reset();
+    buildGhosts();
+    frightenedTimer = 0;
+  }
+}
+
+function winLevel() {
+  gameState = STATE.WIN;
+  saveHigh();
+  showOverlay('¡GANASTE!', 'Comiste todos los puntos. Puntos: ' + score,
+              'ENTER o ESPACIO para jugar de nuevo', 'win');
+}
+
+function gameOver() {
+  gameState = STATE.GAMEOVER;
+  saveHigh();
+  showOverlay('GAME OVER', 'Puntuación final: ' + score,
+              'ENTER o ESPACIO para reintentar', 'lose');
+}
+
+function saveHigh() {
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem('pacman_high', String(highScore));
+    highEl.textContent = highScore;
+  }
+}
+
+function updateHUD() {
+  scoreEl.textContent = score;
+  livesEl.textContent = lives;
+  highEl.textContent = Math.max(highScore, score);
+}
+
+/* ---------- 10. RENDERIZADO (DIBUJO) ---------- */
+function drawMaze() {
+  for (let f = 0; f < ROWS; f++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = grid[f][c];
+      const x = c * TILE, y = f * TILE;
+      if (v === 1) {
+        // Pared azul neón
+        ctx.fillStyle = '#1565ff';
+        ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+        ctx.fillStyle = '#2979ff';
+        ctx.fillRect(x + 5, y + 5, TILE - 10, TILE - 10);
+      } else if (v === 4) {
+        // Puerta de la casa de fantasmas
+        ctx.fillStyle = '#ff80ab';
+        ctx.fillRect(x + 2, y + TILE/2 - 1, TILE - 4, 3);
+      } else if (v === 0) {
+        // Punto pequeño (comida)
+        ctx.fillStyle = '#ffe0b2';
+        ctx.beginPath();
+        ctx.arc(x + TILE/2, y + TILE/2, 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (v === 2) {
+        // Power-up parpadeante
+        const r = 5 + Math.sin(Date.now() / 150) * 1.5;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(x + TILE/2, y + TILE/2, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+function drawPlayer() {
+  const x = player.c * TILE + TILE/2;
+  const y = player.f * TILE + TILE/2;
+  const r = TILE/2 - 1;
+  // Ángulo de apertura de la boca según dirección
+  let base = 0;
+  if (player.dir === 'right') base = 0;
+  if (player.dir === 'left')  base = Math.PI;
+  if (player.dir === 'up')    base = -Math.PI/2;
+  if (player.dir === 'down')  base = Math.PI/2;
+  const m = player.dir === 'none' ? 0.25 : player.mouth;
+
+  ctx.fillStyle = '#ffeb3b';
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.arc(x, y, r, base + m, base + Math.PI * 2 - m);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawGhost(g) {
+  const x = g.c * TILE + TILE/2;
+  const y = g.f * TILE + TILE/2;
+  const r = TILE/2 - 1;
+
+  let body = g.color;
+  if (g.eaten) body = null;                         // solo ojos
+  else if (frightenedTimer > 0) {
+    // Azul asustado, parpadea blanco en los últimos 2 segundos
+    body = (frightenedTimer < 120 && Math.floor(Date.now()/200) % 2)
+           ? '#fff' : '#2121ff';
+  }
+
+  if (body) {
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(x, y - 1, r, Math.PI, 0);              // cabeza redondeada
+    ctx.lineTo(x + r, y + r);
+    // Faldón ondulado inferior
+    for (let i = 0; i < 3; i++) {
+      ctx.lineTo(x + r - (r*2/3)*(i+0.5), y + r - (i%2===0?4:0));
+      ctx.lineTo(x + r - (r*2/3)*(i+1),   y + r);
+    }
+    ctx.lineTo(x - r, y - 1);
+    ctx.fill();
+  }
+
+  // Ojos (siempre)
+  const look = DIRS[g.dir] || DIRS.none;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - 3, y - 1, 3, 0, Math.PI*2);
+  ctx.arc(x + 3, y - 1, 3, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = (frightenedTimer > 0 && !g.eaten) ? '#2121ff' : '#001';
+  ctx.beginPath();
+  ctx.arc(x - 3 + look.x*1.4, y - 1 + look.y*1.4, 1.5, 0, Math.PI*2);
+  ctx.arc(x + 3 + look.x*1.4, y - 1 + look.y*1.4, 1.5, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawMaze();
+  drawPlayer();
+  for (const g of ghosts) drawGhost(g);
+}
+
+/* ---------- 11. BUCLE PRINCIPAL (60 FPS) ---------- */
+function loop() {
+  if (gameState === STATE.PLAYING) {
+    updatePlayer();
+    updateGhosts();
+    checkCollisions();
+    if (frightenedTimer > 0) frightenedTimer--;
+  }
+  if (gameState !== STATE.START) render();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- 12. CONTROL DE PANTALLAS / ARRANQUE ---------- */
+function showOverlay(title, msg, sub, cls) {
+  overlay.classList.remove('hidden');
+  overlayTitle.className = 'big blink' + (cls ? ' ' + cls : '');
+  overlayTitle.textContent = title;
+  overlayMsg.innerHTML = msg + (sub ? '<br><span class="blink">' + sub + '</span>' : '');
+}
+function hideOverlay() { overlay.classList.add('hidden'); }
+
+function startGame() {
+  if (gameState === STATE.START) newLevel();
+  hideOverlay();
+  gameState = STATE.PLAYING;
+  updateHUD();
+}
+
+// Estado inicial
+buildGrid();
+buildGhosts();
+player.reset();
+updateHUD();
+loop();
+</script>
+</body>
+</html>
